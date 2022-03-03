@@ -329,6 +329,31 @@ func (s *Server) UnregisterAll() error {
 	return nil
 }
 
+func (s *service) callWithServier(ctx context.Context, mtype *methodType, servicer, argv, replyv reflect.Value) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 4096)
+			n := runtime.Stack(buf, false)
+			buf = buf[:n]
+
+			err = fmt.Errorf("[service internal error]: %v, method: %s, argv: %+v, stack: %s",
+				r, mtype.method.Name, argv.Interface(), buf)
+			log.Error(err)
+		}
+	}()
+
+	function := mtype.method.Func
+	// Invoke the method, providing a new value for the reply.
+	returnValues := function.Call([]reflect.Value{s.rcvr, reflect.ValueOf(ctx), servicer, argv, replyv})
+	// The return value for the method is an error.
+	errInter := returnValues[0].Interface()
+	if errInter != nil {
+		return errInter.(error)
+	}
+
+	return nil
+}
+
 func (s *service) call(ctx context.Context, mtype *methodType, argv, replyv reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {

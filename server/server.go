@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/soheilhy/cmux"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/soheilhy/cmux"
 
 	"github.com/smallnest/rpcx/log"
 	"github.com/smallnest/rpcx/protocol"
@@ -645,6 +646,103 @@ func (s *Server) auth(ctx context.Context, req *protocol.Message) error {
 	}
 
 	return nil
+}
+
+func (s *Server) handleAgentRequest(ctx context.Context, req *protocol.Message, servicer interface{}) (res *protocol.Message, err error) {
+	serviceName := req.ServicePath
+	methodName := req.ServiceMethod
+
+	res = req.Clone()
+
+	res.SetMessageType(protocol.Response)
+	s.serviceMapMu.RLock()
+	service := s.serviceMap[serviceName]
+
+	if share.Trace {
+		log.Debugf("server get service %+v for an request %+v", service, req)
+	}
+
+	s.serviceMapMu.RUnlock()
+	if service == nil {
+		err = errors.New("rpcx: can't find service " + serviceName)
+		return handleError(res, err)
+	}
+	mtype := service.method[methodName]
+	if mtype == nil {
+		if service.function[methodName] != nil { // check raw functions
+			return s.handleRequestForFunction(ctx, req)
+		}
+		err = errors.New("rpcx: can't find method " + methodName)
+		return handleError(res, err)
+	}
+
+	// get a argv object from object pool
+	argv := reflectTypePools.Get(mtype.ArgType)
+
+	codec := share.Codecs[req.SerializeType()]
+	if codec == nil {
+		err = fmt.Errorf("can not find codec for %d", req.SerializeType())
+		return handleError(res, err)
+	}
+
+	err = codec.Decode(req.Payload, argv)
+	if err != nil {
+		return handleError(res, err)
+	}
+
+	// and get a reply object from object pool
+	replyv := reflectTypePools.Get(mtype.ReplyType)
+
+	argv, err = s.Plugins.DoPreCall(ctx, serviceName, methodName, argv)
+	if err != nil {
+		// return reply to object pool
+		reflectTypePools.Put(mtype.ReplyType, replyv)
+		return handleError(res, err)
+	}
+
+	if mtype.ArgType.Kind() != reflect.Ptr {
+		err = service.callWithServier(ctx, mtype, reflect.ValueOf(servicer), reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
+	} else {
+		err = service.callWithServier(ctx, mtype, reflect.ValueOf(servicer), reflect.ValueOf(argv), reflect.ValueOf(replyv))
+	}
+
+	if err == nil {
+		replyv, err = s.Plugins.DoPostCall(ctx, serviceName, methodName, argv, replyv)
+	}
+
+	// return argc to object pool
+	reflectTypePools.Put(mtype.ArgType, argv)
+
+	if err != nil {
+		if replyv != nil {
+			data, err := codec.Encode(replyv)
+			// return reply to object pool
+			reflectTypePools.Put(mtype.ReplyType, replyv)
+			if err != nil {
+				return handleError(res, err)
+			}
+			res.Payload = data
+		}
+		return handleError(res, err)
+	}
+
+	if !req.IsOneway() {
+		data, err := codec.Encode(replyv)
+		// return reply to object pool
+		reflectTypePools.Put(mtype.ReplyType, replyv)
+		if err != nil {
+			return handleError(res, err)
+		}
+		res.Payload = data
+	} else if replyv != nil {
+		reflectTypePools.Put(mtype.ReplyType, replyv)
+	}
+
+	if share.Trace {
+		log.Debugf("server called service %+v for an request %+v", service, req)
+	}
+
+	return res, nil
 }
 
 func (s *Server) handleRequest(ctx context.Context, req *protocol.Message) (res *protocol.Message, err error) {
