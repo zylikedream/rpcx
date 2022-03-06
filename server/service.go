@@ -77,6 +77,10 @@ func (s *Server) Register(rcvr interface{}, metadata string) error {
 	return s.Plugins.DoRegister(sname, rcvr, metadata)
 }
 
+func (s *Server) RegisterAgent(path string, agent ServiceAgent) {
+	s.serviceAgent[path] = agent
+}
+
 // RegisterName is like Register but uses the provided name for the type
 // instead of the receiver's concrete type.
 func (s *Server) RegisterName(name string, rcvr interface{}, metadata string) error {
@@ -236,9 +240,18 @@ func (s *Server) registerFunction(servicePath string, fn interface{}, name strin
 	return fname, nil
 }
 
+func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
+	methods := suitableMethodsNoAgent(typ, reportErr)
+	if len(methods) > 0 {
+		return methods
+	}
+	methods = suitableMethodsWithAgent(typ, reportErr)
+	return methods
+}
+
 // suitableMethods returns suitable Rpc methods of typ, it will report
 // error using log if reportErr is true.
-func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
+func suitableMethodsNoAgent(typ reflect.Type, reportErr bool) map[string]*methodType {
 	methods := make(map[string]*methodType)
 	for m := 0; m < typ.NumMethod(); m++ {
 		method := typ.Method(m)
@@ -310,6 +323,93 @@ func suitableMethods(typ reflect.Type, reportErr bool) map[string]*methodType {
 	return methods
 }
 
+func suitableMethodsWithAgent(typ reflect.Type, reportErr bool) map[string]*methodType {
+	methods := make(map[string]*methodType)
+	var agentType reflect.Type
+	for m := 0; m < typ.NumMethod(); m++ {
+		method := typ.Method(m)
+		mtype := method.Type
+		mname := method.Name
+		// Method must be exported.
+		if method.PkgPath != "" {
+			continue
+		}
+		// Method needs four ins: receiver, context.Context, *args, *reply.
+		if mtype.NumIn() != 5 {
+			if reportErr {
+				log.Debug("method ", mname, " has wrong number of ins:", mtype.NumIn())
+			}
+			continue
+		}
+		// First arg must be context.Context
+		ctxType := mtype.In(1)
+		if !ctxType.Implements(typeOfContext) {
+			if reportErr {
+				log.Debug("method ", mname, " must use context.Context as the first parameter")
+			}
+			continue
+		}
+
+		agentType1 := mtype.In(2)
+		if agentType1.Kind() != reflect.Ptr {
+			if reportErr {
+				log.Info("method", mname, " servier type not a pointer:", agentType)
+			}
+			continue
+		}
+		if agentType == nil {
+			agentType = agentType1
+		} else if agentType != agentType1 {
+			if reportErr {
+				log.Info("method", mname, "agent type not equal: want(", agentType, "), get(", agentType1, ")")
+			}
+		}
+		// Second arg need not be a pointer.
+		argType := mtype.In(3)
+		if !isExportedOrBuiltinType(argType) {
+			if reportErr {
+				log.Info(mname, " parameter type not exported: ", argType)
+			}
+			continue
+		}
+		// Third arg must be a pointer.
+		replyType := mtype.In(4)
+		if replyType.Kind() != reflect.Ptr {
+			if reportErr {
+				log.Info("method", mname, " reply type not a pointer:", replyType)
+			}
+			continue
+		}
+		// Reply type must be exported.
+		if !isExportedOrBuiltinType(replyType) {
+			if reportErr {
+				log.Info("method", mname, " reply type not exported:", replyType)
+			}
+			continue
+		}
+		// Method needs one out.
+		if mtype.NumOut() != 1 {
+			if reportErr {
+				log.Info("method", mname, " has wrong number of outs:", mtype.NumOut())
+			}
+			continue
+		}
+		// The return type of the method must be error.
+		if returnType := mtype.Out(0); returnType != typeOfError {
+			if reportErr {
+				log.Info("method", mname, " returns ", returnType.String(), " not error")
+			}
+			continue
+		}
+		methods[mname] = &methodType{method: method, ArgType: argType, ReplyType: replyType}
+
+		// init pool for reflect.Type of args and reply
+		reflectTypePools.Init(argType)
+		reflectTypePools.Init(replyType)
+	}
+	return methods
+}
+
 // UnregisterAll unregisters all services.
 // You can call this method when you want to shutdown/upgrade this node.
 func (s *Server) UnregisterAll() error {
@@ -329,7 +429,7 @@ func (s *Server) UnregisterAll() error {
 	return nil
 }
 
-func (s *service) callWithServier(ctx context.Context, mtype *methodType, servicer, argv, replyv reflect.Value) (err error) {
+func (s *service) callWithAgent(ctx context.Context, mtype *methodType, agent, argv, replyv reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
@@ -344,7 +444,7 @@ func (s *service) callWithServier(ctx context.Context, mtype *methodType, servic
 
 	function := mtype.method.Func
 	// Invoke the method, providing a new value for the reply.
-	returnValues := function.Call([]reflect.Value{s.rcvr, reflect.ValueOf(ctx), servicer, argv, replyv})
+	returnValues := function.Call([]reflect.Value{s.rcvr, reflect.ValueOf(ctx), agent, argv, replyv})
 	// The return value for the method is an error.
 	errInter := returnValues[0].Interface()
 	if errInter != nil {

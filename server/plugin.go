@@ -28,6 +28,7 @@ type PluginContainer interface {
 
 	DoPreHandleRequest(ctx context.Context, req *protocol.Message) error
 	DoPreCall(ctx context.Context, serviceName, methodName string, args interface{}) (interface{}, error)
+	DoPreCallWithAgent(ctx context.Context, serviceName, methodName string, servicer interface{}, args interface{}) (interface{}, error)
 	DoPostCall(ctx context.Context, serviceName, methodName string, args, reply interface{}) (interface{}, error)
 
 	DoPreWriteResponse(context.Context, *protocol.Message, *protocol.Message, error) error
@@ -85,6 +86,10 @@ type (
 
 	PreCallPlugin interface {
 		PreCall(ctx context.Context, serviceName, methodName string, args interface{}) (interface{}, error)
+	}
+
+	PreCallPluginWithAgent interface {
+		PreCallWithAgent(ctx context.Context, serviceName, methodName string, agent interface{}, args interface{}) (interface{}, error)
 	}
 
 	PostCallPlugin interface {
@@ -282,6 +287,20 @@ func (p *pluginContainer) DoPreCall(ctx context.Context, serviceName, methodName
 	for i := range p.plugins {
 		if plugin, ok := p.plugins[i].(PreCallPlugin); ok {
 			args, err = plugin.PreCall(ctx, serviceName, methodName, args)
+			if err != nil {
+				return args, err
+			}
+		}
+	}
+
+	return args, err
+}
+
+func (p *pluginContainer) DoPreCallWithAgent(ctx context.Context, serviceName, methodName string, servicer interface{}, args interface{}) (interface{}, error) {
+	var err error
+	for i := range p.plugins {
+		if plugin, ok := p.plugins[i].(PreCallPluginWithAgent); ok {
+			args, err = plugin.PreCallWithAgent(ctx, serviceName, methodName, servicer, args)
 			if err != nil {
 				return args, err
 			}

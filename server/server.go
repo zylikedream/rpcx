@@ -69,6 +69,11 @@ var (
 
 type Handler func(ctx *Context) error
 
+type Call = func(agent interface{})
+type ServiceAgent interface {
+	PushCall(context.Context, *protocol.Message, Call) error
+}
+
 // Server is rpcx server that use TCP or UDP.
 type Server struct {
 	ln                 net.Listener
@@ -81,6 +86,7 @@ type Server struct {
 
 	serviceMapMu sync.RWMutex
 	serviceMap   map[string]*service
+	serviceAgent map[string]ServiceAgent
 
 	router map[string]Handler
 
@@ -472,7 +478,7 @@ func (s *Server) serveConn(conn net.Conn) {
 			continue
 		}
 
-		go func() {
+		handler := func(agent interface{}) {
 			defer func() {
 				if r := recover(); r != nil {
 					// maybe panic because the writeCh is closed.
@@ -523,7 +529,21 @@ func (s *Server) serveConn(conn net.Conn) {
 				return
 			}
 
-			res, err := s.handleRequest(ctx, req)
+			var res *protocol.Message
+			var err error
+			if agent == nil {
+				res, err = s.handleRequest(ctx, req)
+			} else {
+				s.serviceMapMu.RLock()
+				service := s.serviceMap[req.ServicePath]
+				s.serviceMapMu.RUnlock()
+				if reflect.DeepEqual(agent, service.rcvr.Interface()) {
+					// rcv已经等于agent了
+					res, err = s.handleRequest(ctx, req)
+				} else {
+					res, err = s.handleAgentRequest(ctx, req, agent)
+				}
+			}
 			if err != nil {
 				if s.HandleServiceError != nil {
 					s.HandleServiceError(err)
@@ -568,7 +588,35 @@ func (s *Server) serveConn(conn net.Conn) {
 
 			protocol.FreeMsg(req)
 			protocol.FreeMsg(res)
-		}()
+		}
+		if agent, ok := s.serviceAgent[req.ServicePath]; ok {
+			err = agent.PushCall(ctx, req, handler)
+			if err != nil {
+				if !req.IsOneway() {
+					res := req.Clone()
+					res.SetMessageType(protocol.Response)
+					if len(res.Payload) > 1024 && req.CompressType() != protocol.None {
+						res.SetCompressType(req.CompressType())
+					}
+					handleError(res, err)
+					s.Plugins.DoPreWriteResponse(ctx, req, res, err)
+					data := res.EncodeSlicePointer()
+					if s.AsyncWrite {
+						writeCh <- data
+					} else {
+						conn.Write(*data)
+						protocol.PutData(data)
+					}
+					s.Plugins.DoPostWriteResponse(ctx, req, res, err)
+					protocol.FreeMsg(res)
+				} else {
+					s.Plugins.DoPreWriteResponse(ctx, req, nil, err)
+				}
+				protocol.FreeMsg(req)
+			}
+		} else {
+			go handler(nil)
+		}
 	}
 }
 
@@ -648,7 +696,7 @@ func (s *Server) auth(ctx context.Context, req *protocol.Message) error {
 	return nil
 }
 
-func (s *Server) handleAgentRequest(ctx context.Context, req *protocol.Message, servicer interface{}) (res *protocol.Message, err error) {
+func (s *Server) handleAgentRequest(ctx context.Context, req *protocol.Message, agent interface{}) (res *protocol.Message, err error) {
 	serviceName := req.ServicePath
 	methodName := req.ServiceMethod
 
@@ -693,7 +741,7 @@ func (s *Server) handleAgentRequest(ctx context.Context, req *protocol.Message, 
 	// and get a reply object from object pool
 	replyv := reflectTypePools.Get(mtype.ReplyType)
 
-	argv, err = s.Plugins.DoPreCall(ctx, serviceName, methodName, argv)
+	argv, err = s.Plugins.DoPreCallWithAgent(ctx, serviceName, methodName, agent, argv)
 	if err != nil {
 		// return reply to object pool
 		reflectTypePools.Put(mtype.ReplyType, replyv)
@@ -701,9 +749,9 @@ func (s *Server) handleAgentRequest(ctx context.Context, req *protocol.Message, 
 	}
 
 	if mtype.ArgType.Kind() != reflect.Ptr {
-		err = service.callWithServier(ctx, mtype, reflect.ValueOf(servicer), reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
+		err = service.callWithAgent(ctx, mtype, reflect.ValueOf(agent), reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
 	} else {
-		err = service.callWithServier(ctx, mtype, reflect.ValueOf(servicer), reflect.ValueOf(argv), reflect.ValueOf(replyv))
+		err = service.callWithAgent(ctx, mtype, reflect.ValueOf(agent), reflect.ValueOf(argv), reflect.ValueOf(replyv))
 	}
 
 	if err == nil {
