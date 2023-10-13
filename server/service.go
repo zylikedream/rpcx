@@ -429,7 +429,7 @@ func (s *Server) UnregisterAll() error {
 	return nil
 }
 
-func (s *service) callWithAgent(ctx context.Context, mtype *methodType, agent, argv, replyv reflect.Value) (err error) {
+func (s *service) CallWithAgent(ctx context.Context, mtype *methodType, agent, argv, replyv reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
@@ -454,7 +454,11 @@ func (s *service) callWithAgent(ctx context.Context, mtype *methodType, agent, a
 	return nil
 }
 
-func (s *service) call(ctx context.Context, mtype *methodType, argv, replyv reflect.Value) (err error) {
+func (s *service) GetMethod(method string) *methodType {
+	return s.method[method]
+}
+
+func (s *service) Call(ctx context.Context, mtype *methodType, argv, replyv reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)

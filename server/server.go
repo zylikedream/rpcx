@@ -149,6 +149,14 @@ func (s *Server) Address() net.Addr {
 	return s.ln.Addr()
 }
 
+func (s *Server) GetService(path string) *service {
+	return s.serviceMap[path]
+}
+
+func (s *Server) GetServiceAgent(path string) ServiceAgent {
+	return s.serviceAgent[path]
+}
+
 func (s *Server) AddHandler(servicePath, serviceMethod string, handler func(*Context) error) {
 	s.router[servicePath+"."+serviceMethod] = handler
 }
@@ -749,9 +757,9 @@ func (s *Server) handleAgentRequest(ctx context.Context, req *protocol.Message, 
 	}
 
 	if mtype.ArgType.Kind() != reflect.Ptr {
-		err = service.callWithAgent(ctx, mtype, reflect.ValueOf(agent), reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
+		err = service.CallWithAgent(ctx, mtype, reflect.ValueOf(agent), reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
 	} else {
-		err = service.callWithAgent(ctx, mtype, reflect.ValueOf(agent), reflect.ValueOf(argv), reflect.ValueOf(replyv))
+		err = service.CallWithAgent(ctx, mtype, reflect.ValueOf(agent), reflect.ValueOf(argv), reflect.ValueOf(replyv))
 	}
 
 	if err == nil {
@@ -846,9 +854,9 @@ func (s *Server) handleRequest(ctx context.Context, req *protocol.Message) (res 
 	}
 
 	if mtype.ArgType.Kind() != reflect.Ptr {
-		err = service.call(ctx, mtype, reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
+		err = service.Call(ctx, mtype, reflect.ValueOf(argv).Elem(), reflect.ValueOf(replyv))
 	} else {
-		err = service.call(ctx, mtype, reflect.ValueOf(argv), reflect.ValueOf(replyv))
+		err = service.Call(ctx, mtype, reflect.ValueOf(argv), reflect.ValueOf(replyv))
 	}
 
 	if err == nil {
